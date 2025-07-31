@@ -13,7 +13,17 @@ import base64
 import json
 import logging
 import mimetypes
-from typing import Any, AsyncGenerator, Dict, Optional, Type, TypedDict, TypeVar, Union, cast
+from typing import (
+    Any,
+    AsyncGenerator,
+    Dict,
+    Optional,
+    Type,
+    TypedDict,
+    TypeVar,
+    Union,
+    cast,
+)
 
 import httpx
 from pydantic import BaseModel
@@ -385,7 +395,10 @@ class LlamaCppModel(Model):
             ]
             formatted_tool_messages = [
                 self._format_tool_message(
-                    {"toolUseId": content["toolResult"]["toolUseId"], "content": content["toolResult"]["content"]}
+                    {
+                        "toolUseId": content["toolResult"]["toolUseId"],
+                        "content": content["toolResult"]["content"],
+                    }
                 )
                 for content in contents
                 if "toolResult" in content
@@ -605,6 +618,7 @@ class LlamaCppModel(Model):
 
             tool_calls: Dict[int, list] = {}
             usage_data = None
+            finish_reason = None
 
             async for line in response.aiter_lines():
                 if not line.strip() or not line.startswith("data: "):
@@ -650,6 +664,7 @@ class LlamaCppModel(Model):
 
                 # Check for finish reason
                 if choice.get("finish_reason"):
+                    finish_reason = choice.get("finish_reason")
                     break
 
             yield self._format_chunk({"chunk_type": "content_stop"})
@@ -702,7 +717,12 @@ class LlamaCppModel(Model):
                 yield self._format_chunk({"chunk_type": "content_stop"})
 
             # Send stop reason
-            stop_reason = "tool_use" if tool_calls else getattr(choice, "finish_reason", "end_turn")
+            logger.debug("finish_reason=%s, tool_calls=%s", finish_reason, bool(tool_calls))
+            if finish_reason == "tool_calls" or tool_calls:
+                stop_reason = "tool_calls"  # Changed from "tool_use" to match format_chunk expectations
+            else:
+                stop_reason = finish_reason or "end_turn"
+            logger.debug("stop_reason=%s", stop_reason)
             yield self._format_chunk({"chunk_type": "message_stop", "data": stop_reason})
 
             # Send usage metadata if available
