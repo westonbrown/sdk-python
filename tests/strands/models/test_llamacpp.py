@@ -66,9 +66,7 @@ class TestLlamaCppModel:
             {"role": "user", "content": [{"text": "Hello"}]},
         ]
 
-        request = model._format_request(
-            messages, system_prompt="You are a helpful assistant"
-        )
+        request = model._format_request(messages, system_prompt="You are a helpful assistant")
 
         assert request["messages"][0]["role"] == "system"
         assert request["messages"][0]["content"] == "You are a helpful assistant"
@@ -97,12 +95,14 @@ class TestLlamaCppModel:
         assert request["temperature"] == 0.8
         assert request["max_tokens"] == 50
 
-        # llama.cpp specific params should be in extra_body
+        # Grammar and json_schema go directly in request for llama.cpp
+        assert request["grammar"] == "root ::= 'yes' | 'no'"
+
+        # Other llama.cpp specific params should be in extra_body
         assert "extra_body" in request
         assert request["extra_body"]["repeat_penalty"] == 1.1
         assert request["extra_body"]["top_k"] == 40
         assert request["extra_body"]["min_p"] == 0.05
-        assert request["extra_body"]["grammar"] == "root ::= 'yes' | 'no'"
 
     def test_format_request_with_all_new_params(self) -> None:
         """Test request formatting with all new llama.cpp parameters."""
@@ -145,7 +145,11 @@ class TestLlamaCppModel:
         assert request["top_p"] == 0.9
         assert request["seed"] == 42
 
-        # Check all llama.cpp params are in extra_body
+        # Grammar and json_schema go directly in request for llama.cpp
+        assert request["grammar"] == "root ::= answer"
+        assert request["json_schema"] == {"type": "object"}
+
+        # Check all other llama.cpp params are in extra_body
         assert "extra_body" in request
         extra = request["extra_body"]
         assert extra["repeat_penalty"] == 1.1
@@ -157,8 +161,6 @@ class TestLlamaCppModel:
         assert extra["mirostat"] == 2
         assert extra["mirostat_lr"] == 0.1
         assert extra["mirostat_ent"] == 5.0
-        assert extra["grammar"] == "root ::= answer"
-        assert extra["json_schema"] == {"type": "object"}
         assert extra["penalty_last_n"] == 256
         assert extra["n_probs"] == 5
         assert extra["min_keep"] == 1
@@ -253,13 +255,11 @@ class TestLlamaCppModel:
             # Verify we got the expected chunks
             assert any("messageStart" in chunk for chunk in chunks)
             assert any(
-                "contentBlockDelta" in chunk
-                and chunk["contentBlockDelta"]["delta"]["text"] == "Hello"
+                "contentBlockDelta" in chunk and chunk["contentBlockDelta"]["delta"]["text"] == "Hello"
                 for chunk in chunks
             )
             assert any(
-                "contentBlockDelta" in chunk
-                and chunk["contentBlockDelta"]["delta"]["text"] == " world"
+                "contentBlockDelta" in chunk and chunk["contentBlockDelta"]["delta"]["text"] == " world"
                 for chunk in chunks
             )
             assert any("messageStop" in chunk for chunk in chunks)
@@ -361,16 +361,10 @@ class TestLlamaCppModel:
         # Create HTTP error response
         error_response = httpx.Response(
             status_code=400,
-            json={
-                "error": {
-                    "message": "Context window exceeded. Max context length is 4096 tokens"
-                }
-            },
+            json={"error": {"message": "Context window exceeded. Max context length is 4096 tokens"}},
             request=httpx.Request("POST", "http://test.com"),
         )
-        error = httpx.HTTPStatusError(
-            "Bad Request", request=error_response.request, response=error_response
-        )
+        error = httpx.HTTPStatusError("Bad Request", request=error_response.request, response=error_response)
 
         # Mock the client to raise the error
         with patch.object(model.client, "post", side_effect=error):
@@ -427,9 +421,7 @@ class TestLlamaCppModel:
         # Create mock stream that returns JSON
         async def mock_stream(*_args, **_kwargs):
             # Check that json_schema was set correctly
-            assert (
-                model.config["params"]["json_schema"] == TestOutput.model_json_schema()
-            )
+            assert model.config["params"]["json_schema"] == TestOutput.model_json_schema()
 
             yield {"messageStart": {"role": "assistant"}}
             yield {"contentBlockStart": {"start": {}}}
@@ -464,9 +456,7 @@ class TestLlamaCppModel:
         # Mock stream that returns invalid JSON
         async def mock_stream(*_args, **_kwargs):
             # Check that json_schema was set correctly
-            assert (
-                model.config["params"]["json_schema"] == TestOutput.model_json_schema()
-            )
+            assert model.config["params"]["json_schema"] == TestOutput.model_json_schema()
 
             yield {"messageStart": {"role": "assistant"}}
             yield {"contentBlockStart": {"start": {}}}
@@ -597,9 +587,7 @@ class TestLlamaCppModel:
         assert result[0]["content"][1]["type"] == "image_url"
         assert "image_url" in result[0]["content"][1]
         assert "url" in result[0]["content"][1]["image_url"]
-        assert result[0]["content"][1]["image_url"]["url"].startswith(
-            "data:image/png;base64,"
-        )
+        assert result[0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
 
     def test_format_messages_with_mixed_content(self) -> None:
         """Test that _format_messages handles mixed audio and image content correctly."""
@@ -637,6 +625,4 @@ class TestLlamaCppModel:
         # Check image content uses standard OpenAI format
         assert result[0]["content"][2]["type"] == "image_url"
         assert "image_url" in result[0]["content"][2]
-        assert result[0]["content"][2]["image_url"]["url"].startswith(
-            "data:image/jpeg;base64,"
-        )
+        assert result[0]["content"][2]["image_url"]["url"].startswith("data:image/jpeg;base64,")

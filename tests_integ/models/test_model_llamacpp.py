@@ -9,14 +9,12 @@ Set LLAMACPP_TEST_URL environment variable to use a different server URL.
 """
 
 import os
-from typing import Any, AsyncGenerator
 
 import pytest
 from pydantic import BaseModel
 
 from strands.models.llamacpp import LlamaCppModel
 from strands.types.content import Message
-
 
 # Get server URL from environment or use default
 LLAMACPP_URL = os.environ.get("LLAMACPP_TEST_URL", "http://localhost:8080/v1")
@@ -30,7 +28,7 @@ pytestmark = pytest.mark.skipif(
 
 class WeatherOutput(BaseModel):
     """Test output model for structured responses."""
-    
+
     temperature: float
     condition: str
     location: str
@@ -44,54 +42,54 @@ async def llamacpp_model() -> LlamaCppModel:
 
 class TestLlamaCppModelIntegration:
     """Integration tests for LlamaCppModel with a real server."""
-    
+
     @pytest.mark.asyncio
     async def test_basic_completion(self, llamacpp_model: LlamaCppModel) -> None:
         """Test basic text completion."""
         messages: list[Message] = [
             {"role": "user", "content": [{"text": "Say 'Hello, World!' and nothing else."}]},
         ]
-        
+
         response_text = ""
         async for event in llamacpp_model.stream(messages):
             if "contentBlockDelta" in event:
                 delta = event["contentBlockDelta"]["delta"]
                 if "text" in delta:
                     response_text += delta["text"]
-        
+
         assert "Hello, World!" in response_text
-    
+
     @pytest.mark.asyncio
     async def test_system_prompt(self, llamacpp_model: LlamaCppModel) -> None:
         """Test completion with system prompt."""
         messages: list[Message] = [
             {"role": "user", "content": [{"text": "Who are you?"}]},
         ]
-        
+
         system_prompt = "You are a helpful AI assistant named Claude."
-        
+
         response_text = ""
         async for event in llamacpp_model.stream(messages, system_prompt=system_prompt):
             if "contentBlockDelta" in event:
                 delta = event["contentBlockDelta"]["delta"]
                 if "text" in delta:
                     response_text += delta["text"]
-        
+
         # Response should reflect the system prompt
         assert len(response_text) > 0
         assert "assistant" in response_text.lower() or "claude" in response_text.lower()
-    
+
     @pytest.mark.asyncio
     async def test_streaming_chunks(self, llamacpp_model: LlamaCppModel) -> None:
         """Test that streaming returns proper chunk sequence."""
         messages: list[Message] = [
             {"role": "user", "content": [{"text": "Count from 1 to 3."}]},
         ]
-        
+
         chunk_types = []
         async for event in llamacpp_model.stream(messages):
             chunk_types.append(next(iter(event.keys())))
-        
+
         # Verify proper chunk sequence
         assert chunk_types[0] == "messageStart"
         assert chunk_types[1] == "contentBlockStart"
@@ -99,24 +97,24 @@ class TestLlamaCppModelIntegration:
         assert chunk_types[-3] == "contentBlockStop"
         assert chunk_types[-2] == "messageStop"
         assert chunk_types[-1] == "metadata"
-    
+
     @pytest.mark.asyncio
     async def test_temperature_parameter(self, llamacpp_model: LlamaCppModel) -> None:
         """Test temperature parameter affects randomness."""
         messages: list[Message] = [
             {"role": "user", "content": [{"text": "Generate a random word."}]},
         ]
-        
+
         # Low temperature should give more consistent results
         llamacpp_model.update_config(params={"temperature": 0.1, "seed": 42})
-        
+
         response1 = ""
         async for event in llamacpp_model.stream(messages):
             if "contentBlockDelta" in event:
                 delta = event["contentBlockDelta"]["delta"]
                 if "text" in delta:
                     response1 += delta["text"]
-        
+
         # Same seed and low temperature should give similar result
         response2 = ""
         async for event in llamacpp_model.stream(messages):
@@ -124,21 +122,21 @@ class TestLlamaCppModelIntegration:
                 delta = event["contentBlockDelta"]["delta"]
                 if "text" in delta:
                     response2 += delta["text"]
-        
+
         # With low temperature and same seed, responses should be very similar
         assert len(response1) > 0
         assert len(response2) > 0
-    
+
     @pytest.mark.asyncio
     async def test_max_tokens_limit(self, llamacpp_model: LlamaCppModel) -> None:
         """Test max_tokens parameter limits response length."""
         messages: list[Message] = [
             {"role": "user", "content": [{"text": "Tell me a very long story about dragons."}]},
         ]
-        
+
         # Set very low token limit
         llamacpp_model.update_config(params={"max_tokens": 10})
-        
+
         token_count = 0
         async for event in llamacpp_model.stream(messages):
             if "metadata" in event:
@@ -146,11 +144,11 @@ class TestLlamaCppModelIntegration:
                 token_count = usage["outputTokens"]
             if "messageStop" in event:
                 stop_reason = event["messageStop"]["stopReason"]
-        
+
         # Should stop due to max_tokens
         assert token_count <= 15  # Allow small overage due to tokenization
         assert stop_reason == "max_tokens"
-    
+
     @pytest.mark.asyncio
     async def test_structured_output(self, llamacpp_model: LlamaCppModel) -> None:
         """Test structured output generation."""
@@ -165,28 +163,28 @@ class TestLlamaCppModelIntegration:
                 ],
             },
         ]
-        
+
         # Enable JSON response format for structured output
         llamacpp_model.update_config(params={"response_format": {"type": "json_object"}})
-        
+
         result = None
         async for event in llamacpp_model.structured_output(WeatherOutput, messages):
             if "output" in event:
                 result = event["output"]
-        
+
         assert result is not None
         assert isinstance(result, WeatherOutput)
         assert isinstance(result.temperature, float)
         assert isinstance(result.condition, str)
         assert result.location.lower() == "paris"
-    
+
     @pytest.mark.asyncio
     async def test_llamacpp_specific_params(self, llamacpp_model: LlamaCppModel) -> None:
         """Test llama.cpp specific parameters."""
         messages: list[Message] = [
             {"role": "user", "content": [{"text": "Say 'test' five times."}]},
         ]
-        
+
         # Use llama.cpp specific parameters
         llamacpp_model.update_config(
             params={
@@ -195,55 +193,55 @@ class TestLlamaCppModelIntegration:
                 "min_p": 0.1,  # Min-p sampling
             }
         )
-        
+
         response_text = ""
         async for event in llamacpp_model.stream(messages):
             if "contentBlockDelta" in event:
                 delta = event["contentBlockDelta"]["delta"]
                 if "text" in delta:
                     response_text += delta["text"]
-        
+
         # Response should contain "test" but with repetition penalty it might vary
         assert "test" in response_text.lower()
-    
+
     @pytest.mark.asyncio
     async def test_advanced_sampling_params(self, llamacpp_model: LlamaCppModel) -> None:
         """Test advanced sampling parameters."""
         messages: list[Message] = [
             {"role": "user", "content": [{"text": "Generate a random sentence about space."}]},
         ]
-        
+
         # Test advanced sampling parameters
         llamacpp_model.update_config(
             params={
                 "temperature": 0.8,
                 "tfs_z": 0.95,  # Tail-free sampling
-                "top_a": 0.1,   # Top-a sampling
+                "top_a": 0.1,  # Top-a sampling
                 "typical_p": 0.9,  # Typical-p sampling
                 "penalty_last_n": 64,  # Penalty context window
                 "min_keep": 1,  # Minimum tokens to keep
-                "samplers": ["top_k", "tfs_z", "typical_p", "top_p", "min_p", "temperature"]
+                "samplers": ["top_k", "tfs_z", "typical_p", "top_p", "min_p", "temperature"],
             }
         )
-        
+
         response_text = ""
         async for event in llamacpp_model.stream(messages):
             if "contentBlockDelta" in event:
                 delta = event["contentBlockDelta"]["delta"]
                 if "text" in delta:
                     response_text += delta["text"]
-        
+
         # Should generate something about space
         assert len(response_text) > 0
         assert any(word in response_text.lower() for word in ["space", "star", "planet", "galaxy", "universe"])
-    
-    @pytest.mark.asyncio 
+
+    @pytest.mark.asyncio
     async def test_mirostat_sampling(self, llamacpp_model: LlamaCppModel) -> None:
         """Test Mirostat sampling modes."""
         messages: list[Message] = [
             {"role": "user", "content": [{"text": "Write a short poem."}]},
         ]
-        
+
         # Test Mirostat v2
         llamacpp_model.update_config(
             params={
@@ -253,105 +251,106 @@ class TestLlamaCppModelIntegration:
                 "seed": 42,  # For reproducibility
             }
         )
-        
+
         response_text = ""
         async for event in llamacpp_model.stream(messages):
             if "contentBlockDelta" in event:
                 delta = event["contentBlockDelta"]["delta"]
                 if "text" in delta:
                     response_text += delta["text"]
-        
+
         # Should generate a poem
         assert len(response_text) > 20
         assert "\n" in response_text  # Poems typically have line breaks
-    
+
     @pytest.mark.asyncio
     async def test_grammar_constraint(self, llamacpp_model: LlamaCppModel) -> None:
         """Test grammar constraint feature (llama.cpp specific)."""
         messages: list[Message] = [
             {"role": "user", "content": [{"text": "Is the sky blue? Answer yes or no."}]},
         ]
-        
+
         # Use the new grammar constraint method
         grammar = """
         root ::= answer
         answer ::= "yes" | "no"
         """
         llamacpp_model.use_grammar_constraint(grammar)
-        
+
         response_text = ""
         async for event in llamacpp_model.stream(messages):
             if "contentBlockDelta" in event:
                 delta = event["contentBlockDelta"]["delta"]
                 if "text" in delta:
                     response_text += delta["text"]
-        
+
         # Response should be exactly "yes" or "no"
         assert response_text.strip().lower() in ["yes", "no"]
-    
+
     @pytest.mark.asyncio
     async def test_json_schema_constraint(self, llamacpp_model: LlamaCppModel) -> None:
         """Test JSON schema constraint feature."""
         messages: list[Message] = [
-            {"role": "user", "content": [{"text": "Describe the weather in JSON format with temperature and description."}]},
+            {
+                "role": "user",
+                "content": [{"text": "Describe the weather in JSON format with temperature and description."}],
+            },
         ]
-        
+
         # Use JSON schema constraint
         schema = {
             "type": "object",
-            "properties": {
-                "temperature": {"type": "number"},
-                "description": {"type": "string"}
-            },
-            "required": ["temperature", "description"]
+            "properties": {"temperature": {"type": "number"}, "description": {"type": "string"}},
+            "required": ["temperature", "description"],
         }
         llamacpp_model.use_json_schema(schema)
-        
+
         response_text = ""
         async for event in llamacpp_model.stream(messages):
             if "contentBlockDelta" in event:
                 delta = event["contentBlockDelta"]["delta"]
                 if "text" in delta:
                     response_text += delta["text"]
-        
+
         # Should be valid JSON matching the schema
         import json
+
         data = json.loads(response_text.strip())
         assert "temperature" in data
         assert "description" in data
         assert isinstance(data["temperature"], (int, float))
         assert isinstance(data["description"], str)
-    
+
     @pytest.mark.asyncio
     async def test_logit_bias(self, llamacpp_model: LlamaCppModel) -> None:
         """Test logit bias feature."""
         messages: list[Message] = [
             {"role": "user", "content": [{"text": "Choose between 'cat' and 'dog'."}]},
         ]
-        
+
         # This is a simplified test - in reality you'd need to know the actual token IDs
         # for "cat" and "dog" in the model's vocabulary
         llamacpp_model.update_config(
             params={
                 "logit_bias": {
                     # These are placeholder token IDs - real implementation would need actual token IDs
-                    1234: 10.0,   # Strong positive bias (hypothetical "cat" token)
+                    1234: 10.0,  # Strong positive bias (hypothetical "cat" token)
                     5678: -10.0,  # Strong negative bias (hypothetical "dog" token)
                 },
                 "seed": 42,  # For reproducibility
             }
         )
-        
+
         response_text = ""
         async for event in llamacpp_model.stream(messages):
             if "contentBlockDelta" in event:
                 delta = event["contentBlockDelta"]["delta"]
                 if "text" in delta:
                     response_text += delta["text"]
-        
+
         # Should generate text (exact behavior depends on actual token IDs)
         assert len(response_text) > 0
-    
+
     @pytest.mark.asyncio
     async def test_cache_prompt(self, llamacpp_model: LlamaCppModel) -> None:
         """Test prompt caching feature."""
@@ -359,7 +358,7 @@ class TestLlamaCppModelIntegration:
             {"role": "system", "content": [{"text": "You are a helpful assistant. Always be concise."}]},
             {"role": "user", "content": [{"text": "What is 2+2?"}]},
         ]
-        
+
         # Enable prompt caching
         llamacpp_model.update_config(
             params={
@@ -367,7 +366,7 @@ class TestLlamaCppModelIntegration:
                 "slot_id": 0,  # Use specific slot for caching
             }
         )
-        
+
         # First request
         response1 = ""
         async for event in llamacpp_model.stream(messages):
@@ -375,34 +374,34 @@ class TestLlamaCppModelIntegration:
                 delta = event["contentBlockDelta"]["delta"]
                 if "text" in delta:
                     response1 += delta["text"]
-        
+
         # Second request with same system prompt should use cache
         messages2 = [
             {"role": "system", "content": [{"text": "You are a helpful assistant. Always be concise."}]},
             {"role": "user", "content": [{"text": "What is 3+3?"}]},
         ]
-        
+
         response2 = ""
         async for event in llamacpp_model.stream(messages2):
             if "contentBlockDelta" in event:
                 delta = event["contentBlockDelta"]["delta"]
                 if "text" in delta:
                     response2 += delta["text"]
-        
+
         # Both should give valid responses
         assert "4" in response1
         assert "6" in response2
-    
+
     @pytest.mark.asyncio
     async def test_concurrent_requests(self, llamacpp_model: LlamaCppModel) -> None:
         """Test handling multiple concurrent requests."""
         import asyncio
-        
+
         async def make_request(prompt: str) -> str:
             messages: list[Message] = [
                 {"role": "user", "content": [{"text": prompt}]},
             ]
-            
+
             response = ""
             async for event in llamacpp_model.stream(messages):
                 if "contentBlockDelta" in event:
@@ -410,31 +409,31 @@ class TestLlamaCppModelIntegration:
                     if "text" in delta:
                         response += delta["text"]
             return response
-        
+
         # Make concurrent requests
         prompts = [
             "Say 'one'",
-            "Say 'two'", 
+            "Say 'two'",
             "Say 'three'",
         ]
-        
+
         responses = await asyncio.gather(*[make_request(p) for p in prompts])
-        
+
         # Each response should contain the expected number
         assert "one" in responses[0].lower()
         assert "two" in responses[1].lower()
         assert "three" in responses[2].lower()
-    
+
     @pytest.mark.asyncio
     async def test_enhanced_structured_output(self, llamacpp_model: LlamaCppModel) -> None:
         """Test enhanced structured output with native JSON schema support."""
-        
+
         class BookInfo(BaseModel):
             title: str
             author: str
             year: int
             genres: list[str]
-        
+
         messages: list[Message] = [
             {
                 "role": "user",
@@ -446,14 +445,14 @@ class TestLlamaCppModelIntegration:
                 ],
             },
         ]
-        
+
         result = None
         events = []
         async for event in llamacpp_model.structured_output(BookInfo, messages):
             events.append(event)
             if "output" in event:
                 result = event["output"]
-        
+
         # Verify we got structured output
         assert result is not None
         assert isinstance(result, BookInfo)
@@ -462,10 +461,10 @@ class TestLlamaCppModelIntegration:
         assert isinstance(result.year, int) and 1900 <= result.year <= 2100
         assert isinstance(result.genres, list) and len(result.genres) >= 2
         assert all(isinstance(genre, str) for genre in result.genres)
-        
+
         # Should have streamed events before the output
         assert len(events) > 1
-    
+
     @pytest.mark.asyncio
     async def test_context_overflow_handling(self, llamacpp_model: LlamaCppModel) -> None:
         """Test proper handling of context window overflow."""
@@ -474,7 +473,7 @@ class TestLlamaCppModelIntegration:
         messages: list[Message] = [
             {"role": "user", "content": [{"text": f"Summarize this text: {long_text}"}]},
         ]
-        
+
         try:
             response_text = ""
             async for event in llamacpp_model.stream(messages):
@@ -482,12 +481,13 @@ class TestLlamaCppModelIntegration:
                     delta = event["contentBlockDelta"]["delta"]
                     if "text" in delta:
                         response_text += delta["text"]
-            
+
             # If it succeeds, we got a response
             assert len(response_text) > 0
         except Exception as e:
             # If it fails, it should be our custom error
             from strands.models.llamacpp import LlamaCppContextOverflowError
+
             if isinstance(e, LlamaCppContextOverflowError):
                 assert "context" in str(e).lower()
             else:

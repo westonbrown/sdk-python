@@ -13,7 +13,7 @@ import base64
 import json
 import logging
 import mimetypes
-from typing import Any, AsyncGenerator, Optional, Type, TypedDict, TypeVar, Union
+from typing import Any, AsyncGenerator, Dict, Optional, Type, TypedDict, TypeVar, Union, cast
 
 import httpx
 from pydantic import BaseModel
@@ -163,9 +163,20 @@ class LlamaCppModel(Model):
         self.config = dict(model_config)
 
         # Configure HTTP client
+        if isinstance(timeout, tuple):
+            # Convert tuple to httpx.Timeout object
+            timeout_obj = httpx.Timeout(
+                connect=timeout[0] if len(timeout) > 0 else None,
+                read=timeout[1] if len(timeout) > 1 else None,
+                write=timeout[2] if len(timeout) > 2 else None,
+                pool=timeout[3] if len(timeout) > 3 else None,
+            )
+        else:
+            timeout_obj = httpx.Timeout(timeout or 30.0)
+
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
-            timeout=timeout or 30.0,
+            timeout=timeout_obj,
         )
 
         logger.debug(
@@ -175,9 +186,7 @@ class LlamaCppModel(Model):
         )
 
     @override
-    def update_config(
-        self, **model_config: Unpack[LlamaCppConfig]
-    ) -> None:  # type: ignore[override]
+    def update_config(self, **model_config: Unpack[LlamaCppConfig]) -> None:  # type: ignore[override]
         """Update the llama.cpp model configuration with provided arguments.
 
         Args:
@@ -218,9 +227,11 @@ class LlamaCppModel(Model):
             ...     number ::= "-"? [0-9]+ ("." [0-9]+)?
             ... ''')
         """
-        if not self.config.get("params"):
-            self.config["params"] = {}
-        self.config["params"]["grammar"] = grammar
+        params = self.config.get("params", {})
+        if not isinstance(params, dict):
+            params = {}
+        params["grammar"] = grammar
+        self.config["params"] = params
         logger.debug(
             "grammar=<%s> | applied grammar constraint",
             grammar[:50] + "..." if len(grammar) > 50 else grammar,
@@ -242,12 +253,14 @@ class LlamaCppModel(Model):
             ...     "required": ["name", "age"]
             ... })
         """
-        if not self.config.get("params"):
-            self.config["params"] = {}
-        self.config["params"]["json_schema"] = schema
+        params = self.config.get("params", {})
+        if not isinstance(params, dict):
+            params = {}
+        params["json_schema"] = schema
+        self.config["params"] = params
         logger.debug("schema=<%s> | applied JSON schema constraint", schema)
 
-    def _format_message_content(self, content: ContentBlock) -> dict[str, Any]:
+    def _format_message_content(self, content: Union[ContentBlock, Dict[str, Any]]) -> dict[str, Any]:
         """Format a content block for llama.cpp.
 
         Args:
@@ -260,12 +273,8 @@ class LlamaCppModel(Model):
             TypeError: If the content block type cannot be converted to a compatible format.
         """
         if "document" in content:
-            mime_type = mimetypes.types_map.get(
-                f".{content['document']['format']}", "application/octet-stream"
-            )
-            file_data = base64.b64encode(content["document"]["source"]["bytes"]).decode(
-                "utf-8"
-            )
+            mime_type = mimetypes.types_map.get(f".{content['document']['format']}", "application/octet-stream")
+            file_data = base64.b64encode(content["document"]["source"]["bytes"]).decode("utf-8")
             return {
                 "file": {
                     "file_data": f"data:{mime_type};base64,{file_data}",
@@ -275,12 +284,8 @@ class LlamaCppModel(Model):
             }
 
         if "image" in content:
-            mime_type = mimetypes.types_map.get(
-                f".{content['image']['format']}", "application/octet-stream"
-            )
-            image_data = base64.b64encode(content["image"]["source"]["bytes"]).decode(
-                "utf-8"
-            )
+            mime_type = mimetypes.types_map.get(f".{content['image']['format']}", "application/octet-stream")
+            image_data = base64.b64encode(content["image"]["source"]["bytes"]).decode("utf-8")
             return {
                 "image_url": {
                     "detail": "auto",
@@ -290,11 +295,11 @@ class LlamaCppModel(Model):
                 "type": "image_url",
             }
 
+        # Handle audio content (not in standard ContentBlock but supported by llama.cpp)
         if "audio" in content:
-            audio_data = base64.b64encode(content["audio"]["source"]["bytes"]).decode(
-                "utf-8"
-            )
-            audio_format = content["audio"].get("format", "wav")
+            audio_content = cast(Dict[str, Any], content)
+            audio_data = base64.b64encode(audio_content["audio"]["source"]["bytes"]).decode("utf-8")
+            audio_format = audio_content["audio"].get("format", "wav")
             return {
                 "type": "input_audio",
                 "input_audio": {"data": audio_data, "format": audio_format},
@@ -343,9 +348,7 @@ class LlamaCppModel(Model):
             "content": [self._format_message_content(content) for content in contents],
         }
 
-    def _format_messages(
-        self, messages: Messages, system_prompt: Optional[str] = None
-    ) -> list[dict[str, Any]]:
+    def _format_messages(self, messages: Messages, system_prompt: Optional[str] = None) -> list[dict[str, Any]]:
         """Format messages for llama.cpp.
 
         Args:
@@ -355,7 +358,7 @@ class LlamaCppModel(Model):
         Returns:
             Formatted messages array compatible with llama.cpp.
         """
-        formatted_messages = []
+        formatted_messages: list[dict[str, Any]] = []
 
         # Add system prompt if provided
         if system_prompt:
@@ -367,17 +370,23 @@ class LlamaCppModel(Model):
             formatted_contents = [
                 self._format_message_content(content)
                 for content in contents
-                if not any(
-                    block_type in content for block_type in ["toolResult", "toolUse"]
-                )
+                if not any(block_type in content for block_type in ["toolResult", "toolUse"])
             ]
             formatted_tool_calls = [
-                self._format_tool_call(content["toolUse"])
+                self._format_tool_call(
+                    {
+                        "name": content["toolUse"]["name"],
+                        "input": content["toolUse"]["input"],
+                        "toolUseId": content["toolUse"]["toolUseId"],
+                    }
+                )
                 for content in contents
                 if "toolUse" in content
             ]
             formatted_tool_messages = [
-                self._format_tool_message(content["toolResult"])
+                self._format_tool_message(
+                    {"toolUseId": content["toolResult"]["toolUseId"], "content": content["toolResult"]["content"]}
+                )
                 for content in contents
                 if "toolResult" in content
             ]
@@ -385,20 +394,12 @@ class LlamaCppModel(Model):
             formatted_message = {
                 "role": message["role"],
                 "content": formatted_contents,
-                **(
-                    {}
-                    if not formatted_tool_calls
-                    else {"tool_calls": formatted_tool_calls}
-                ),
+                **({} if not formatted_tool_calls else {"tool_calls": formatted_tool_calls}),
             }
             formatted_messages.append(formatted_message)
             formatted_messages.extend(formatted_tool_messages)
 
-        return [
-            message
-            for message in formatted_messages
-            if message["content"] or "tool_calls" in message
-        ]
+        return [message for message in formatted_messages if message["content"] or "tool_calls" in message]
 
     def _format_request(
         self,
@@ -436,10 +437,16 @@ class LlamaCppModel(Model):
         }
 
         # Handle parameters if provided
-        if self.config.get("params"):
-            params = self.config["params"]
+        params = self.config.get("params")
+        if params and isinstance(params, dict):
+            # Grammar and json_schema go directly in request body for llama.cpp server
+            if "grammar" in params:
+                request["grammar"] = params["grammar"]
+            if "json_schema" in params:
+                request["json_schema"] = params["json_schema"]
 
             # llama.cpp-specific parameters that must be passed via extra_body
+            # NOTE: grammar and json_schema removed from this set
             llamacpp_specific_params = {
                 "repeat_penalty",
                 "top_k",
@@ -450,8 +457,6 @@ class LlamaCppModel(Model):
                 "mirostat",
                 "mirostat_lr",
                 "mirostat_ent",
-                "grammar",
-                "json_schema",
                 "penalty_last_n",
                 "n_probs",
                 "min_keep",
@@ -483,7 +488,7 @@ class LlamaCppModel(Model):
                     request[param] = value
 
             # Collect llama.cpp-specific parameters for extra_body
-            extra_body = {}
+            extra_body: Dict[str, Any] = {}
             for param, value in params.items():
                 if param in llamacpp_specific_params:
                     extra_body[param] = value
@@ -527,20 +532,10 @@ class LlamaCppModel(Model):
             case "content_delta":
                 if event["data_type"] == "tool":
                     return {
-                        "contentBlockDelta": {
-                            "delta": {
-                                "toolUse": {
-                                    "input": event["data"].function.arguments or ""
-                                }
-                            }
-                        }
+                        "contentBlockDelta": {"delta": {"toolUse": {"input": event["data"].function.arguments or ""}}}
                     }
                 if event["data_type"] == "reasoning_content":
-                    return {
-                        "contentBlockDelta": {
-                            "delta": {"reasoningContent": {"text": event["data"]}}
-                        }
-                    }
+                    return {"contentBlockDelta": {"delta": {"reasoningContent": {"text": event["data"]}}}}
                 return {"contentBlockDelta": {"delta": {"text": event["data"]}}}
 
             case "content_stop":
@@ -606,11 +601,9 @@ class LlamaCppModel(Model):
 
             logger.debug("processing streaming response")
             yield self._format_chunk({"chunk_type": "message_start"})
-            yield self._format_chunk(
-                {"chunk_type": "content_start", "data_type": "text"}
-            )
+            yield self._format_chunk({"chunk_type": "content_start", "data_type": "text"})
 
-            tool_calls = {}
+            tool_calls: Dict[int, list] = {}
             usage_data = None
 
             async for line in response.aiter_lines():
@@ -676,9 +669,7 @@ class LlamaCppModel(Model):
                                     "Function",
                                     (),
                                     {
-                                        "name": first_delta.get("function", {}).get(
-                                            "name", ""
-                                        ),
+                                        "name": first_delta.get("function", {}).get("name", ""),
                                     },
                                 )(),
                                 "id": first_delta.get("id", ""),
@@ -700,9 +691,7 @@ class LlamaCppModel(Model):
                                         "Function",
                                         (),
                                         {
-                                            "arguments": tool_delta.get(
-                                                "function", {}
-                                            ).get("arguments", ""),
+                                            "arguments": tool_delta.get("function", {}).get("arguments", ""),
                                         },
                                     )(),
                                 },
@@ -713,14 +702,8 @@ class LlamaCppModel(Model):
                 yield self._format_chunk({"chunk_type": "content_stop"})
 
             # Send stop reason
-            stop_reason = (
-                "tool_use"
-                if tool_calls
-                else getattr(choice, "finish_reason", "end_turn")
-            )
-            yield self._format_chunk(
-                {"chunk_type": "message_stop", "data": stop_reason}
-            )
+            stop_reason = "tool_use" if tool_calls else getattr(choice, "finish_reason", "end_turn")
+            yield self._format_chunk({"chunk_type": "message_stop", "data": stop_reason})
 
             # Send usage metadata if available
             if usage_data:
@@ -732,9 +715,7 @@ class LlamaCppModel(Model):
                             (),
                             {
                                 "prompt_tokens": usage_data.get("prompt_tokens", 0),
-                                "completion_tokens": usage_data.get(
-                                    "completion_tokens", 0
-                                ),
+                                "completion_tokens": usage_data.get("completion_tokens", 0),
                                 "total_tokens": usage_data.get("total_tokens", 0),
                             },
                         )(),
@@ -748,24 +729,15 @@ class LlamaCppModel(Model):
                 # Parse error response from llama.cpp server
                 try:
                     error_data = e.response.json()
-                    error_msg = str(
-                        error_data.get("error", {}).get("message", str(error_data))
-                    )
+                    error_msg = str(error_data.get("error", {}).get("message", str(error_data)))
                 except (json.JSONDecodeError, KeyError, AttributeError):
                     error_msg = e.response.text
 
                 # Check for context overflow by looking for specific error indicators
-                if any(
-                    term in error_msg.lower()
-                    for term in ["context", "kv cache", "slot"]
-                ):
-                    raise LlamaCppContextOverflowError(
-                        f"Context window exceeded: {error_msg}"
-                    ) from e
+                if any(term in error_msg.lower() for term in ["context", "kv cache", "slot"]):
+                    raise LlamaCppContextOverflowError(f"Context window exceeded: {error_msg}") from e
             elif e.response.status_code == 503:
-                raise ModelThrottledException(
-                    "llama.cpp server is busy or overloaded"
-                ) from e
+                raise ModelThrottledException("llama.cpp server is busy or overloaded") from e
             raise
         except Exception as e:
             # Handle other potential errors like rate limiting
@@ -804,27 +776,27 @@ class LlamaCppModel(Model):
         schema = output_model.model_json_schema()
 
         # Store current params to restore later
-        original_params = self.config.get("params", {}).copy()
+        params = self.config.get("params", {})
+        original_params = dict(params) if isinstance(params, dict) else {}
 
         try:
             # Configure for JSON output with schema constraint
-            if not self.config.get("params"):
-                self.config["params"] = {}
-
-            self.config["params"]["json_schema"] = schema
-            self.config["params"]["cache_prompt"] = True
+            params = self.config.get("params", {})
+            if not isinstance(params, dict):
+                params = {}
+            params["json_schema"] = schema
+            params["cache_prompt"] = True
+            self.config["params"] = params
 
             # Collect the response
             response_text = ""
-            async for event in self.stream(
-                prompt, system_prompt=system_prompt, **kwargs
-            ):
+            async for event in self.stream(prompt, system_prompt=system_prompt, **kwargs):
                 if "contentBlockDelta" in event:
                     delta = event["contentBlockDelta"]["delta"]
                     if "text" in delta:
                         response_text += delta["text"]
                 # Forward events to caller
-                yield event
+                yield cast(Dict[str, Union[T, Any]], event)
 
             # Parse and validate the JSON response
             data = json.loads(response_text.strip())
