@@ -1,22 +1,29 @@
 """llama.cpp model provider.
 
+Provides integration with llama.cpp servers running in OpenAI-compatible mode,
+with support for advanced llama.cpp-specific features.
+
 - Docs: https://github.com/ggml-org/llama.cpp
 - Server docs: https://github.com/ggml-org/llama.cpp/tree/master/tools/server
+- OpenAI API compatibility:
+  https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md#api-endpoints
 """
 
+import base64
 import json
 import logging
+import mimetypes
 from typing import Any, AsyncGenerator, Optional, Type, TypedDict, TypeVar, Union
 
 import httpx
 from pydantic import BaseModel
 from typing_extensions import Unpack, override
 
-from ..types.content import Messages
+from ..types.content import ContentBlock, Messages
 from ..types.exceptions import ContextWindowOverflowException, ModelThrottledException
 from ..types.streaming import StreamEvent
 from ..types.tools import ToolSpec
-from .openai import OpenAIModel
+from .model import Model
 
 logger = logging.getLogger(__name__)
 
@@ -24,28 +31,38 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class LlamaCppError(Exception):
-    """Base exception for llama.cpp specific errors."""
-    pass
+    """Base exception for llama.cpp specific errors.
+
+    This exception serves as the base class for all llama.cpp-specific errors,
+    allowing for targeted error handling in client code.
+    """
 
 
 class LlamaCppContextOverflowError(LlamaCppError, ContextWindowOverflowException):
-    """Raised when context window is exceeded in llama.cpp."""
-    pass
+    """Raised when context window is exceeded in llama.cpp.
+
+    This error occurs when the combined input and output tokens exceed
+    the model's context window size. Common causes include:
+    - Long input prompts
+    - Extended conversations
+    - Large system prompts or tool definitions
+    """
 
 
-class LlamaCppModel(OpenAIModel):
+class LlamaCppModel(Model):
     """llama.cpp model provider implementation.
 
     Connects to a llama.cpp server running in OpenAI-compatible mode with
     support for advanced llama.cpp-specific features like grammar constraints,
-    Mirostat sampling, and native JSON schema validation.
+    Mirostat sampling, native JSON schema validation, and native multimodal
+    support for audio and image content.
 
     The llama.cpp server must be started with the OpenAI-compatible API enabled:
         llama-server -m model.gguf --host 0.0.0.0 --port 8080
 
     Example:
         Basic usage:
-        >>> model = LlamaCppModel(base_url="http://localhost:8080/v1")
+        >>> model = LlamaCppModel(base_url="http://localhost:8080")
         >>> model.update_config(params={"temperature": 0.7, "top_k": 40})
 
         Grammar constraints:
@@ -61,6 +78,21 @@ class LlamaCppModel(OpenAIModel):
         ...     "tfs_z": 0.95,
         ...     "repeat_penalty": 1.1
         ... })
+
+        Multimodal usage (requires multimodal model like Qwen2.5-Omni):
+        >>> # Audio analysis
+        >>> audio_content = [{
+        ...     "audio": {"source": {"bytes": audio_bytes}, "format": "wav"},
+        ...     "text": "What do you hear in this audio?"
+        ... }]
+        >>> response = agent(audio_content)
+
+        >>> # Image analysis
+        >>> image_content = [{
+        ...     "image": {"source": {"bytes": image_bytes}, "format": "png"},
+        ...     "text": "Describe this image"
+        ... }]
+        >>> response = agent(image_content)
     """
 
     class LlamaCppConfig(TypedDict, total=False):
@@ -110,37 +142,31 @@ class LlamaCppModel(OpenAIModel):
 
     def __init__(
         self,
-        base_url: str = "http://localhost:8080/v1",
-        api_key: Optional[str] = None,
+        base_url: str = "http://localhost:8080",
         timeout: Optional[Union[float, tuple[float, float]]] = None,
-        max_retries: Optional[int] = None,
         **model_config: Unpack[LlamaCppConfig],
     ) -> None:
         """Initialize llama.cpp provider instance.
 
         Args:
             base_url: Base URL for the llama.cpp server.
-                Default is "http://localhost:8080/v1" for local server.
-            api_key: Optional API key if the llama.cpp server requires authentication.
-            timeout: Request timeout in seconds. Can be a float or tuple of (connect, read) timeouts.
-            max_retries: Maximum number of retries for failed requests.
+                Default is "http://localhost:8080" for local server.
+            timeout: Request timeout in seconds. Can be float or tuple of
+                (connect, read) timeouts.
             **model_config: Configuration options for the llama.cpp model.
         """
         # Set default model_id if not provided
         if "model_id" not in model_config:
             model_config["model_id"] = "default"
 
-        # Build OpenAI client args
-        client_args = {
-            "base_url": base_url,
-            "api_key": api_key or "dummy",  # OpenAI client requires some API key
-        }
+        self.base_url = base_url.rstrip("/")
+        self.config = dict(model_config)
 
-        if timeout is not None:
-            client_args["timeout"] = timeout
-
-        if max_retries is not None:
-            client_args["max_retries"] = max_retries
+        # Configure HTTP client
+        self.client = httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=timeout or 30.0,
+        )
 
         logger.debug(
             "base_url=<%s>, model_id=<%s> | initializing llama.cpp provider",
@@ -148,11 +174,28 @@ class LlamaCppModel(OpenAIModel):
             model_config.get("model_id"),
         )
 
-        # Initialize parent OpenAI model with our client args
-        super().__init__(client_args=client_args, **model_config)
+    @override
+    def update_config(
+        self, **model_config: Unpack[LlamaCppConfig]
+    ) -> None:  # type: ignore[override]
+        """Update the llama.cpp model configuration with provided arguments.
+
+        Args:
+            **model_config: Configuration overrides.
+        """
+        self.config.update(model_config)
+
+    @override
+    def get_config(self) -> LlamaCppConfig:
+        """Get the llama.cpp model configuration.
+
+        Returns:
+            The llama.cpp model configuration.
+        """
+        return self.config  # type: ignore[return-value]
 
     def use_grammar_constraint(self, grammar: str) -> None:
-        """Apply a GBNF grammar constraint to the generation.
+        r"""Apply a GBNF grammar constraint to the generation.
 
         Args:
             grammar: GBNF (Backus-Naur Form) grammar string defining allowed outputs.
@@ -170,7 +213,7 @@ class LlamaCppModel(OpenAIModel):
             ...     root ::= object
             ...     object ::= "{" pair ("," pair)* "}"
             ...     pair ::= string ":" value
-            ...     string ::= "\\"" [^"]* "\\""
+            ...     string ::= "\"" [^"]* "\""
             ...     value ::= string | number | "true" | "false" | "null"
             ...     number ::= "-"? [0-9]+ ("." [0-9]+)?
             ... ''')
@@ -178,7 +221,10 @@ class LlamaCppModel(OpenAIModel):
         if not self.config.get("params"):
             self.config["params"] = {}
         self.config["params"]["grammar"] = grammar
-        logger.debug("Applied grammar constraint")
+        logger.debug(
+            "grammar=<%s> | applied grammar constraint",
+            grammar[:50] + "..." if len(grammar) > 50 else grammar,
+        )
 
     def use_json_schema(self, schema: dict[str, Any]) -> None:
         """Apply a JSON schema constraint for structured output.
@@ -199,18 +245,168 @@ class LlamaCppModel(OpenAIModel):
         if not self.config.get("params"):
             self.config["params"] = {}
         self.config["params"]["json_schema"] = schema
-        logger.debug("Applied JSON schema constraint")
+        logger.debug("schema=<%s> | applied JSON schema constraint", schema)
 
-    @override
-    def format_request(
+    def _format_message_content(self, content: ContentBlock) -> dict[str, Any]:
+        """Format a content block for llama.cpp.
+
+        Args:
+            content: Message content.
+
+        Returns:
+            llama.cpp compatible content block.
+
+        Raises:
+            TypeError: If the content block type cannot be converted to a compatible format.
+        """
+        if "document" in content:
+            mime_type = mimetypes.types_map.get(
+                f".{content['document']['format']}", "application/octet-stream"
+            )
+            file_data = base64.b64encode(content["document"]["source"]["bytes"]).decode(
+                "utf-8"
+            )
+            return {
+                "file": {
+                    "file_data": f"data:{mime_type};base64,{file_data}",
+                    "filename": content["document"]["name"],
+                },
+                "type": "file",
+            }
+
+        if "image" in content:
+            mime_type = mimetypes.types_map.get(
+                f".{content['image']['format']}", "application/octet-stream"
+            )
+            image_data = base64.b64encode(content["image"]["source"]["bytes"]).decode(
+                "utf-8"
+            )
+            return {
+                "image_url": {
+                    "detail": "auto",
+                    "format": mime_type,
+                    "url": f"data:{mime_type};base64,{image_data}",
+                },
+                "type": "image_url",
+            }
+
+        if "audio" in content:
+            audio_data = base64.b64encode(content["audio"]["source"]["bytes"]).decode(
+                "utf-8"
+            )
+            audio_format = content["audio"].get("format", "wav")
+            return {
+                "type": "input_audio",
+                "input_audio": {"data": audio_data, "format": audio_format},
+            }
+
+        if "text" in content:
+            return {"text": content["text"], "type": "text"}
+
+        raise TypeError(f"content_type=<{next(iter(content))}> | unsupported type")
+
+    def _format_tool_call(self, tool_use: dict[str, Any]) -> dict[str, Any]:
+        """Format a tool call for llama.cpp.
+
+        Args:
+            tool_use: Tool use requested by the model.
+
+        Returns:
+            llama.cpp compatible tool call.
+        """
+        return {
+            "function": {
+                "arguments": json.dumps(tool_use["input"]),
+                "name": tool_use["name"],
+            },
+            "id": tool_use["toolUseId"],
+            "type": "function",
+        }
+
+    def _format_tool_message(self, tool_result: dict[str, Any]) -> dict[str, Any]:
+        """Format a tool message for llama.cpp.
+
+        Args:
+            tool_result: Tool result collected from a tool execution.
+
+        Returns:
+            llama.cpp compatible tool message.
+        """
+        contents = [
+            {"text": json.dumps(content["json"])} if "json" in content else content
+            for content in tool_result["content"]
+        ]
+
+        return {
+            "role": "tool",
+            "tool_call_id": tool_result["toolUseId"],
+            "content": [self._format_message_content(content) for content in contents],
+        }
+
+    def _format_messages(
+        self, messages: Messages, system_prompt: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """Format messages for llama.cpp.
+
+        Args:
+            messages: List of message objects to be processed.
+            system_prompt: System prompt to provide context to the model.
+
+        Returns:
+            Formatted messages array compatible with llama.cpp.
+        """
+        formatted_messages = []
+
+        # Add system prompt if provided
+        if system_prompt:
+            formatted_messages.append({"role": "system", "content": system_prompt})
+
+        for message in messages:
+            contents = message["content"]
+
+            formatted_contents = [
+                self._format_message_content(content)
+                for content in contents
+                if not any(
+                    block_type in content for block_type in ["toolResult", "toolUse"]
+                )
+            ]
+            formatted_tool_calls = [
+                self._format_tool_call(content["toolUse"])
+                for content in contents
+                if "toolUse" in content
+            ]
+            formatted_tool_messages = [
+                self._format_tool_message(content["toolResult"])
+                for content in contents
+                if "toolResult" in content
+            ]
+
+            formatted_message = {
+                "role": message["role"],
+                "content": formatted_contents,
+                **(
+                    {}
+                    if not formatted_tool_calls
+                    else {"tool_calls": formatted_tool_calls}
+                ),
+            }
+            formatted_messages.append(formatted_message)
+            formatted_messages.extend(formatted_tool_messages)
+
+        return [
+            message
+            for message in formatted_messages
+            if message["content"] or "tool_calls" in message
+        ]
+
+    def _format_request(
         self,
         messages: Messages,
         tool_specs: Optional[list[ToolSpec]] = None,
         system_prompt: Optional[str] = None,
     ) -> dict[str, Any]:
         """Format a request for the llama.cpp server.
-
-        This method overrides the OpenAI format to properly handle llama.cpp-specific parameters.
 
         Args:
             messages: List of message objects to be processed by the model.
@@ -220,12 +416,9 @@ class LlamaCppModel(OpenAIModel):
         Returns:
             A request formatted for llama.cpp server's OpenAI-compatible API.
         """
-        # Build base request structure without calling super() to avoid
-        # parameter conflicts between OpenAI and llama.cpp specific params.
-        # This allows us to properly separate parameters into the appropriate
-        # request fields (direct vs extra_body).
+        # Separate OpenAI-compatible and llama.cpp-specific parameters
         request = {
-            "messages": self.format_request_messages(messages, system_prompt),
+            "messages": self._format_messages(messages, system_prompt),
             "model": self.config["model_id"],
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -246,7 +439,7 @@ class LlamaCppModel(OpenAIModel):
         if self.config.get("params"):
             params = self.config["params"]
 
-            # Define llama.cpp-specific parameters that need special handling
+            # llama.cpp-specific parameters that must be passed via extra_body
             llamacpp_specific_params = {
                 "repeat_penalty",
                 "top_k",
@@ -269,7 +462,7 @@ class LlamaCppModel(OpenAIModel):
                 "samplers",
             }
 
-            # Standard OpenAI parameters that go directly in request
+            # Standard OpenAI parameters that go directly in the request
             openai_params = {
                 "temperature",
                 "max_tokens",
@@ -301,6 +494,84 @@ class LlamaCppModel(OpenAIModel):
 
         return request
 
+    def _format_chunk(self, event: dict[str, Any]) -> StreamEvent:
+        """Format a llama.cpp response event into a standardized message chunk.
+
+        Args:
+            event: A response event from the llama.cpp server.
+
+        Returns:
+            The formatted chunk.
+
+        Raises:
+            RuntimeError: If chunk_type is not recognized.
+        """
+        match event["chunk_type"]:
+            case "message_start":
+                return {"messageStart": {"role": "assistant"}}
+
+            case "content_start":
+                if event["data_type"] == "tool":
+                    return {
+                        "contentBlockStart": {
+                            "start": {
+                                "toolUse": {
+                                    "name": event["data"].function.name,
+                                    "toolUseId": event["data"].id,
+                                }
+                            }
+                        }
+                    }
+                return {"contentBlockStart": {"start": {}}}
+
+            case "content_delta":
+                if event["data_type"] == "tool":
+                    return {
+                        "contentBlockDelta": {
+                            "delta": {
+                                "toolUse": {
+                                    "input": event["data"].function.arguments or ""
+                                }
+                            }
+                        }
+                    }
+                if event["data_type"] == "reasoning_content":
+                    return {
+                        "contentBlockDelta": {
+                            "delta": {"reasoningContent": {"text": event["data"]}}
+                        }
+                    }
+                return {"contentBlockDelta": {"delta": {"text": event["data"]}}}
+
+            case "content_stop":
+                return {"contentBlockStop": {}}
+
+            case "message_stop":
+                match event["data"]:
+                    case "tool_calls":
+                        return {"messageStop": {"stopReason": "tool_use"}}
+                    case "length":
+                        return {"messageStop": {"stopReason": "max_tokens"}}
+                    case _:
+                        return {"messageStop": {"stopReason": "end_turn"}}
+
+            case "metadata":
+                return {
+                    "metadata": {
+                        "usage": {
+                            "inputTokens": event["data"].prompt_tokens,
+                            "outputTokens": event["data"].completion_tokens,
+                            "totalTokens": event["data"].total_tokens,
+                        },
+                        "metrics": {
+                            "latencyMs": 0,  # TODO: Add actual latency calculation
+                        },
+                    },
+                }
+
+            case _:
+                raise RuntimeError(f"chunk_type=<{event['chunk_type']}> | unknown type")
+
     @override
     async def stream(
         self,
@@ -310,8 +581,6 @@ class LlamaCppModel(OpenAIModel):
         **kwargs: Any,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Stream conversation with the llama.cpp model.
-
-        This method extends the OpenAI stream to handle llama.cpp-specific errors.
 
         Args:
             messages: List of message objects to be processed by the model.
@@ -327,19 +596,169 @@ class LlamaCppModel(OpenAIModel):
             ModelThrottledException: When the llama.cpp server is overloaded.
         """
         try:
-            async for event in super().stream(messages, tool_specs, system_prompt, **kwargs):
-                yield event
+            logger.debug("formatting request for llama.cpp server")
+            request = self._format_request(messages, tool_specs, system_prompt)
+            logger.debug("request=<%s>", request)
+
+            logger.debug("sending request to llama.cpp server")
+            response = await self.client.post("/v1/chat/completions", json=request)
+            response.raise_for_status()
+
+            logger.debug("processing streaming response")
+            yield self._format_chunk({"chunk_type": "message_start"})
+            yield self._format_chunk(
+                {"chunk_type": "content_start", "data_type": "text"}
+            )
+
+            tool_calls = {}
+            usage_data = None
+
+            async for line in response.aiter_lines():
+                if not line.strip() or not line.startswith("data: "):
+                    continue
+
+                data_content = line[6:]  # Remove "data: " prefix
+                if data_content.strip() == "[DONE]":
+                    break
+
+                try:
+                    event = json.loads(data_content)
+                except json.JSONDecodeError:
+                    continue
+
+                # Handle usage information
+                if "usage" in event:
+                    usage_data = event["usage"]
+                    continue
+
+                if not event.get("choices"):
+                    continue
+
+                choice = event["choices"][0]
+                delta = choice.get("delta", {})
+
+                # Handle content deltas
+                if "content" in delta and delta["content"]:
+                    yield self._format_chunk(
+                        {
+                            "chunk_type": "content_delta",
+                            "data_type": "text",
+                            "data": delta["content"],
+                        }
+                    )
+
+                # Handle tool calls
+                if "tool_calls" in delta:
+                    for tool_call in delta["tool_calls"]:
+                        index = tool_call["index"]
+                        if index not in tool_calls:
+                            tool_calls[index] = []
+                        tool_calls[index].append(tool_call)
+
+                # Check for finish reason
+                if choice.get("finish_reason"):
+                    break
+
+            yield self._format_chunk({"chunk_type": "content_stop"})
+
+            # Process tool calls
+            for tool_deltas in tool_calls.values():
+                first_delta = tool_deltas[0]
+                yield self._format_chunk(
+                    {
+                        "chunk_type": "content_start",
+                        "data_type": "tool",
+                        "data": type(
+                            "ToolCall",
+                            (),
+                            {
+                                "function": type(
+                                    "Function",
+                                    (),
+                                    {
+                                        "name": first_delta.get("function", {}).get(
+                                            "name", ""
+                                        ),
+                                    },
+                                )(),
+                                "id": first_delta.get("id", ""),
+                            },
+                        )(),
+                    }
+                )
+
+                for tool_delta in tool_deltas:
+                    yield self._format_chunk(
+                        {
+                            "chunk_type": "content_delta",
+                            "data_type": "tool",
+                            "data": type(
+                                "ToolCall",
+                                (),
+                                {
+                                    "function": type(
+                                        "Function",
+                                        (),
+                                        {
+                                            "arguments": tool_delta.get(
+                                                "function", {}
+                                            ).get("arguments", ""),
+                                        },
+                                    )(),
+                                },
+                            )(),
+                        }
+                    )
+
+                yield self._format_chunk({"chunk_type": "content_stop"})
+
+            # Send stop reason
+            stop_reason = (
+                "tool_use"
+                if tool_calls
+                else getattr(choice, "finish_reason", "end_turn")
+            )
+            yield self._format_chunk(
+                {"chunk_type": "message_stop", "data": stop_reason}
+            )
+
+            # Send usage metadata if available
+            if usage_data:
+                yield self._format_chunk(
+                    {
+                        "chunk_type": "metadata",
+                        "data": type(
+                            "Usage",
+                            (),
+                            {
+                                "prompt_tokens": usage_data.get("prompt_tokens", 0),
+                                "completion_tokens": usage_data.get(
+                                    "completion_tokens", 0
+                                ),
+                                "total_tokens": usage_data.get("total_tokens", 0),
+                            },
+                        )(),
+                    }
+                )
+
+            logger.debug("finished streaming response")
+
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 400:
-                # Parse error response
+                # Parse error response from llama.cpp server
                 try:
                     error_data = e.response.json()
-                    error_msg = str(error_data.get("error", {}).get("message", str(error_data)))
+                    error_msg = str(
+                        error_data.get("error", {}).get("message", str(error_data))
+                    )
                 except (json.JSONDecodeError, KeyError, AttributeError):
                     error_msg = e.response.text
 
-                # Check for context overflow
-                if any(term in error_msg.lower() for term in ["context", "kv cache", "slot"]):
+                # Check for context overflow by looking for specific error indicators
+                if any(
+                    term in error_msg.lower()
+                    for term in ["context", "kv cache", "slot"]
+                ):
                     raise LlamaCppContextOverflowError(
                         f"Context window exceeded: {error_msg}"
                     ) from e
@@ -349,7 +768,7 @@ class LlamaCppModel(OpenAIModel):
                 ) from e
             raise
         except Exception as e:
-            # Handle other potential errors
+            # Handle other potential errors like rate limiting
             error_msg = str(e).lower()
             if "rate" in error_msg or "429" in str(e):
                 raise ModelThrottledException(str(e)) from e
@@ -357,7 +776,11 @@ class LlamaCppModel(OpenAIModel):
 
     @override
     async def structured_output(
-        self, output_model: Type[T], prompt: Messages, system_prompt: Optional[str] = None, **kwargs: Any
+        self,
+        output_model: Type[T],
+        prompt: Messages,
+        system_prompt: Optional[str] = None,
+        **kwargs: Any,
     ) -> AsyncGenerator[dict[str, Union[T, Any]], None]:
         """Get structured output using llama.cpp's native JSON schema support.
 
@@ -389,16 +812,18 @@ class LlamaCppModel(OpenAIModel):
                 self.config["params"] = {}
 
             self.config["params"]["json_schema"] = schema
-            self.config["params"]["cache_prompt"] = True  # Cache schema processing
+            self.config["params"]["cache_prompt"] = True
 
             # Collect the response
             response_text = ""
-            async for event in self.stream(prompt, system_prompt=system_prompt, **kwargs):
+            async for event in self.stream(
+                prompt, system_prompt=system_prompt, **kwargs
+            ):
                 if "contentBlockDelta" in event:
                     delta = event["contentBlockDelta"]["delta"]
                     if "text" in delta:
                         response_text += delta["text"]
-                # Pass through other events
+                # Forward events to caller
                 yield event
 
             # Parse and validate the JSON response
@@ -407,31 +832,5 @@ class LlamaCppModel(OpenAIModel):
             yield {"output": output_instance}
 
         finally:
-            # Restore original params
+            # Restore original configuration
             self.config["params"] = original_params
-
-    def _generate_pydantic_grammar(self, model: Type[BaseModel]) -> str:
-        """Generate a GBNF grammar from a Pydantic model.
-
-        Args:
-            model: The Pydantic model to generate grammar for.
-
-        Returns:
-            GBNF grammar string.
-
-        Note:
-            This provides a basic JSON grammar. A future enhancement would
-            generate model-specific grammars based on the Pydantic schema.
-        """
-        # Basic JSON grammar that works for most cases
-        return '''
-root ::= object
-object ::= "{" pair ("," pair)* "}"
-pair ::= string ":" value
-string ::= "\\"" [^"]* "\\""
-value ::= string | number | boolean | null | array | object
-array ::= "[" (value ("," value)*)? "]"
-number ::= "-"? [0-9]+ ("." [0-9]+)?
-boolean ::= "true" | "false"
-null ::= "null"
-'''
