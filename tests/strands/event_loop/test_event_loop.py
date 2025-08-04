@@ -19,7 +19,12 @@ from strands.hooks import (
 )
 from strands.telemetry.metrics import EventLoopMetrics
 from strands.tools.registry import ToolRegistry
-from strands.types.exceptions import ContextWindowOverflowException, EventLoopException, ModelThrottledException
+from strands.types.exceptions import (
+    ContextWindowOverflowException,
+    EventLoopException,
+    MaxTokensReachedException,
+    ModelThrottledException,
+)
 from tests.fixtures.mock_hook_provider import MockHookProvider
 
 
@@ -554,6 +559,51 @@ async def test_event_loop_tracing_with_model_error(
 
     # Verify error handling span methods were called
     mock_tracer.end_span_with_error.assert_called_once_with(model_span, "Input too long", model.stream.side_effect)
+
+
+@pytest.mark.asyncio
+async def test_event_loop_cycle_max_tokens_exception(
+    agent,
+    model,
+    agenerator,
+    alist,
+):
+    """Test that max_tokens stop reason raises MaxTokensReachedException."""
+
+    # Note the empty toolUse to handle case raised in https://github.com/strands-agents/sdk-python/issues/495
+    model.stream.return_value = agenerator(
+        [
+            {
+                "contentBlockStart": {
+                    "start": {
+                        "toolUse": {},
+                    },
+                },
+            },
+            {"contentBlockStop": {}},
+            {"messageStop": {"stopReason": "max_tokens"}},
+        ]
+    )
+
+    # Call event_loop_cycle, expecting it to raise MaxTokensReachedException
+    with pytest.raises(MaxTokensReachedException) as exc_info:
+        stream = strands.event_loop.event_loop.event_loop_cycle(
+            agent=agent,
+            invocation_state={},
+        )
+        await alist(stream)
+
+    # Verify the exception message contains the expected content
+    expected_message = (
+        "Agent has reached an unrecoverable state due to max_tokens limit. "
+        "For more information see: "
+        "https://strandsagents.com/latest/user-guide/concepts/agents/agent-loop/#maxtokensreachedexception"
+    )
+    assert str(exc_info.value) == expected_message
+
+    # Verify that the message has not been appended to the messages array
+    assert len(agent.messages) == 1
+    assert exc_info.value.incomplete_message not in agent.messages
 
 
 @patch("strands.event_loop.event_loop.get_tracer")
