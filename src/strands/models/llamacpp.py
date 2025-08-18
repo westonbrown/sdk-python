@@ -57,11 +57,13 @@ class LlamaCppModel(Model):
         >>> model = LlamaCppModel(base_url="http://localhost:8080")
         >>> model.update_config(params={"temperature": 0.7, "top_k": 40})
 
-        Grammar constraints:
-        >>> model.use_grammar_constraint('''
-        ...     root ::= answer
-        ...     answer ::= "yes" | "no"
-        ... ''')
+        Grammar constraints via params:
+        >>> model.update_config(params={
+        ...     "grammar": '''
+        ...         root ::= answer
+        ...         answer ::= "yes" | "no"
+        ...     '''
+        ... })
 
         Advanced sampling:
         >>> model.update_config(params={
