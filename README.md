@@ -154,20 +154,13 @@ llama_model = LlamaAPIModel(
 )
 agent = Agent(model=llama_model)
 response = agent("Tell me about Agentic AI")
-
-# llama.cpp
-llamacpp_model = LlamaCppModel(
-    base_url="http://localhost:8080",
-    params={"temperature": 0.7, "max_tokens": 100}
-)
-agent = Agent(model=llamacpp_model)
-response = agent("Tell me about Agentic AI")
 ```
 
 Built-in providers:
  - [Amazon Bedrock](https://strandsagents.com/latest/user-guide/concepts/model-providers/amazon-bedrock/)
  - [Anthropic](https://strandsagents.com/latest/user-guide/concepts/model-providers/anthropic/)
  - [LiteLLM](https://strandsagents.com/latest/user-guide/concepts/model-providers/litellm/)
+ - [llama.cpp](https://strandsagents.com/latest/user-guide/concepts/model-providers/llamacpp/)
  - [LlamaAPI](https://strandsagents.com/latest/user-guide/concepts/model-providers/llamaapi/)
  - [Ollama](https://strandsagents.com/latest/user-guide/concepts/model-providers/ollama/)
  - [OpenAI](https://strandsagents.com/latest/user-guide/concepts/model-providers/openai/)
