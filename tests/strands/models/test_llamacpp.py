@@ -8,11 +8,9 @@ import httpx
 import pytest
 from pydantic import BaseModel
 
-from strands.models.llamacpp import (
-    LlamaCppContextOverflowError,
-    LlamaCppModel,
-)
+from strands.models.llamacpp import LlamaCppModel
 from strands.types.exceptions import (
+    ContextWindowOverflowException,
     ModelThrottledException,
 )
 
@@ -320,36 +318,30 @@ class TestLlamaCppModel:
         model = LlamaCppModel()
         assert model.config["model_id"] == "default"
 
-    def test_use_grammar_constraint(self) -> None:
-        """Test grammar constraint method."""
-        model = LlamaCppModel()
-
-        # Apply grammar constraint
+    def test_grammar_constraint_via_params(self) -> None:
+        """Test grammar constraint via params."""
         grammar = """
         root ::= answer
         answer ::= "yes" | "no"
         """
-        model.use_grammar_constraint(grammar)
+        model = LlamaCppModel(params={"grammar": grammar})
 
         assert model.config["params"]["grammar"] == grammar
 
-        # Update grammar
+        # Update grammar via update_config
         new_grammar = "root ::= [0-9]+"
-        model.use_grammar_constraint(new_grammar)
+        model.update_config(params={"grammar": new_grammar})
 
         assert model.config["params"]["grammar"] == new_grammar
 
-    def test_use_json_schema(self) -> None:
-        """Test JSON schema constraint method."""
-        model = LlamaCppModel()
-
-        # Apply JSON schema
+    def test_json_schema_via_params(self) -> None:
+        """Test JSON schema constraint via params."""
         schema = {
             "type": "object",
             "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
             "required": ["name", "age"],
         }
-        model.use_json_schema(schema)
+        model = LlamaCppModel(params={"json_schema": schema})
 
         assert model.config["params"]["json_schema"] == schema
 
@@ -370,7 +362,7 @@ class TestLlamaCppModel:
         with patch.object(model.client, "post", side_effect=error):
             messages = [{"role": "user", "content": [{"text": "Very long message"}]}]
 
-            with pytest.raises(LlamaCppContextOverflowError) as exc_info:
+            with pytest.raises(ContextWindowOverflowException) as exc_info:
                 async for _ in model.stream(messages):
                     pass
 

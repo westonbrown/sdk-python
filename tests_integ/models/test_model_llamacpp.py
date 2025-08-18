@@ -270,12 +270,12 @@ class TestLlamaCppModelIntegration:
             {"role": "user", "content": [{"text": "Is the sky blue? Answer yes or no."}]},
         ]
 
-        # Use the new grammar constraint method
+        # Set grammar constraint via params
         grammar = """
         root ::= answer
         answer ::= "yes" | "no"
         """
-        llamacpp_model.use_grammar_constraint(grammar)
+        llamacpp_model.update_config(params={"grammar": grammar})
 
         response_text = ""
         async for event in llamacpp_model.stream(messages):
@@ -297,13 +297,13 @@ class TestLlamaCppModelIntegration:
             },
         ]
 
-        # Use JSON schema constraint
+        # Set JSON schema constraint via params
         schema = {
             "type": "object",
             "properties": {"temperature": {"type": "number"}, "description": {"type": "string"}},
             "required": ["temperature", "description"],
         }
-        llamacpp_model.use_json_schema(schema)
+        llamacpp_model.update_config(params={"json_schema": schema})
 
         response_text = ""
         async for event in llamacpp_model.stream(messages):
@@ -486,9 +486,9 @@ class TestLlamaCppModelIntegration:
             assert len(response_text) > 0
         except Exception as e:
             # If it fails, it should be our custom error
-            from strands.models.llamacpp import LlamaCppContextOverflowError
+            from strands.types.exceptions import ContextWindowOverflowException
 
-            if isinstance(e, LlamaCppContextOverflowError):
+            if isinstance(e, ContextWindowOverflowException):
                 assert "context" in str(e).lower()
             else:
                 # Some other error - re-raise to see what it was

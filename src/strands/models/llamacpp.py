@@ -13,6 +13,7 @@ import base64
 import json
 import logging
 import mimetypes
+import time
 from typing import (
     Any,
     AsyncGenerator,
@@ -38,25 +39,6 @@ from .model import Model
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
-
-
-class LlamaCppError(Exception):
-    """Base exception for llama.cpp specific errors.
-
-    This exception serves as the base class for all llama.cpp-specific errors,
-    allowing for targeted error handling in client code.
-    """
-
-
-class LlamaCppContextOverflowError(LlamaCppError, ContextWindowOverflowException):
-    """Raised when context window is exceeded in llama.cpp.
-
-    This error occurs when the combined input and output tokens exceed
-    the model's context window size. Common causes include:
-    - Long input prompts
-    - Extended conversations
-    - Large system prompts or tool definitions
-    """
 
 
 class LlamaCppModel(Model):
@@ -213,62 +195,7 @@ class LlamaCppModel(Model):
         """
         return self.config  # type: ignore[return-value]
 
-    def use_grammar_constraint(self, grammar: str) -> None:
-        r"""Apply a GBNF grammar constraint to the generation.
 
-        Args:
-            grammar: GBNF (Backus-Naur Form) grammar string defining allowed outputs.
-                     See https://github.com/ggerganov/llama.cpp/blob/master/grammars/README.md
-
-        Example:
-            >>> # Constrain output to yes/no answers
-            >>> model.use_grammar_constraint('''
-            ...     root ::= answer
-            ...     answer ::= "yes" | "no"
-            ... ''')
-
-            >>> # JSON object grammar
-            >>> model.use_grammar_constraint('''
-            ...     root ::= object
-            ...     object ::= "{" pair ("," pair)* "}"
-            ...     pair ::= string ":" value
-            ...     string ::= "\"" [^"]* "\""
-            ...     value ::= string | number | "true" | "false" | "null"
-            ...     number ::= "-"? [0-9]+ ("." [0-9]+)?
-            ... ''')
-        """
-        params = self.config.get("params", {})
-        if not isinstance(params, dict):
-            params = {}
-        params["grammar"] = grammar
-        self.config["params"] = params
-        logger.debug(
-            "grammar=<%s> | applied grammar constraint",
-            grammar[:50] + "..." if len(grammar) > 50 else grammar,
-        )
-
-    def use_json_schema(self, schema: dict[str, Any]) -> None:
-        """Apply a JSON schema constraint for structured output.
-
-        Args:
-            schema: JSON schema dictionary defining the expected output structure.
-
-        Example:
-            >>> model.use_json_schema({
-            ...     "type": "object",
-            ...     "properties": {
-            ...         "name": {"type": "string"},
-            ...         "age": {"type": "integer", "minimum": 0}
-            ...     },
-            ...     "required": ["name", "age"]
-            ... })
-        """
-        params = self.config.get("params", {})
-        if not isinstance(params, dict):
-            params = {}
-        params["json_schema"] = schema
-        self.config["params"] = params
-        logger.debug("schema=<%s> | applied JSON schema constraint", schema)
 
     def _format_message_content(self, content: Union[ContentBlock, Dict[str, Any]]) -> dict[str, Any]:
         """Format a content block for llama.cpp.
@@ -459,7 +386,8 @@ class LlamaCppModel(Model):
                 request["json_schema"] = params["json_schema"]
 
             # llama.cpp-specific parameters that must be passed via extra_body
-            # NOTE: grammar and json_schema removed from this set
+            # NOTE: grammar and json_schema are NOT in this set because llama.cpp server
+            # expects them directly in the request body for proper constraint application
             llamacpp_specific_params = {
                 "repeat_penalty",
                 "top_k",
@@ -572,7 +500,7 @@ class LlamaCppModel(Model):
                             "totalTokens": event["data"].total_tokens,
                         },
                         "metrics": {
-                            "latencyMs": 0,  # TODO: Add actual latency calculation
+                            "latencyMs": event.get("latency_ms", 0),
                         },
                     },
                 }
@@ -600,9 +528,12 @@ class LlamaCppModel(Model):
             Formatted message chunks from the model.
 
         Raises:
-            LlamaCppContextOverflowError: When the context window is exceeded.
+            ContextWindowOverflowException: When the context window is exceeded.
             ModelThrottledException: When the llama.cpp server is overloaded.
         """
+        # Track request start time for latency calculation
+        start_time = time.perf_counter()
+        
         try:
             logger.debug("formatting request for llama.cpp server")
             request = self._format_request(messages, tool_specs, system_prompt)
@@ -727,6 +658,8 @@ class LlamaCppModel(Model):
 
             # Send usage metadata if available
             if usage_data:
+                # Calculate latency
+                latency_ms = int((time.perf_counter() - start_time) * 1000)
                 yield self._format_chunk(
                     {
                         "chunk_type": "metadata",
@@ -739,6 +672,7 @@ class LlamaCppModel(Model):
                                 "total_tokens": usage_data.get("total_tokens", 0),
                             },
                         )(),
+                        "latency_ms": latency_ms,
                     }
                 )
 
@@ -755,7 +689,7 @@ class LlamaCppModel(Model):
 
                 # Check for context overflow by looking for specific error indicators
                 if any(term in error_msg.lower() for term in ["context", "kv cache", "slot"]):
-                    raise LlamaCppContextOverflowError(f"Context window exceeded: {error_msg}") from e
+                    raise ContextWindowOverflowException(f"Context window exceeded: {error_msg}") from e
             elif e.response.status_code == 503:
                 raise ModelThrottledException("llama.cpp server is busy or overloaded") from e
             raise
