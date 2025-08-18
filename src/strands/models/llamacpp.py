@@ -195,8 +195,6 @@ class LlamaCppModel(Model):
         """
         return self.config  # type: ignore[return-value]
 
-
-
     def _format_message_content(self, content: Union[ContentBlock, Dict[str, Any]]) -> dict[str, Any]:
         """Format a content block for llama.cpp.
 
@@ -533,7 +531,7 @@ class LlamaCppModel(Model):
         """
         # Track request start time for latency calculation
         start_time = time.perf_counter()
-        
+
         try:
             logger.debug("formatting request for llama.cpp server")
             request = self._format_request(messages, tool_specs, system_prompt)
